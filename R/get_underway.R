@@ -19,7 +19,7 @@ get_underway <- function(init = FALSE, filename = NULL) {
   filename <- "nuyina_underway.parquet"
   #piggyback::pb_download(filename, "mdsumner/uwy.new", tag = "v0.0.1")
   file.remove(filename)
-  curl::curl_download("https://github.com/mdsumner/uwy.new/releases/download/v0.0.1/nuyina_underway.parquet", "nuyina_underway.parquet")
+  curl::curl_download("https://github.com/mdsumner/uwy.new/releases/download/v0.0.1/nuyina_underway.parquet", filename)
   dat <- NULL
   offset <- 0
   query0 <- "SELECT * FROM \"underway:nuyina_underway\""
@@ -36,10 +36,10 @@ get_underway <- function(init = FALSE, filename = NULL) {
       query <- glue::glue(query1)
     }
   }
-  Sys.setenv("OGR_WFS_USE_STREAMING" = "YES")
+  #Sys.setenv("OGR_WFS_USE_STREAMING" = "YES")
 
 
-
+#print(query)
   uwy <- vapour::vapour_read_fields("WFS:https://data.aad.gov.au/geoserver/ows?service=wfs&version=2.0.0&request=GetCapabilities",
                                     sql = query)
 
@@ -48,14 +48,11 @@ get_underway <- function(init = FALSE, filename = NULL) {
   if (!inherits(uwy$datetime, "POSIXct")) {
     uwy$datetime <- as.POSIXct(uwy$datetime, "%Y/%m/%d %H:%M:%S", tz = "UTC")
   }
-  ## if this fails should we just do again with init = TRUE?
-  dat <- try(dplyr::bind_rows(dat, uwy))
-  if (inherits(dat, "try-error")) stop("appending failed, try with init = TRUE")
 
-  bad <- abs(dat$longitude) < .1 & abs(dat$latitude) < .1  ## FIXME
+#  bad <- abs(dat$longitude) < .1 & abs(dat$latitude) < .1  ## FIXME
   #dat$longitude <- abs(dat$longitude)  ## FIXME when geoserver feed is fixed
-  if (any(bad)) dat <- dat[!bad, ]
-  dat <- dplyr::arrange(dplyr::distinct(dat, .data$datetime, .data$longitude, .data$latitude, .keep_all = TRUE), .data$datetime)
+ # if (any(bad)) dat <- dat[!bad, ]
+  dat <- dplyr::arrange(dplyr::distinct(uwy, .data$datetime, .data$longitude, .data$latitude, .keep_all = TRUE), .data$datetime)
 
   unlink(filename)
   arrow::write_parquet(dat, filename)
