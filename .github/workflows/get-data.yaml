@@ -46,4 +46,4 @@ jobs:
         run: Rscript -e 'source("R/get_underway.R", echo = TRUE);get_underway(init  = FALSE)'
 
       - name: Piggyback upload
-        run: Rscript -e 'piggyback::pb_upload("nuyina_underway.parquet", repo = "mdsumner/uwy.new", tag = "v0.0.1", overwrite = TRUE)'
+        run: Rscript -e 'piggyback::pb_delete("nuyina_underway.parquet", repo = "mdsumner/uwy.new", tag = "v0.0.1"); piggyback::pb_upload("nuyina_underway.parquet", repo = "mdsumner/uwy.new", tag = "v0.0.1")'
