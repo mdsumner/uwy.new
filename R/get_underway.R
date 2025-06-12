@@ -18,7 +18,7 @@ get_underway <- function(init = FALSE, filename = NULL) {
 
   filename <- "nuyina_underway.parquet"
   #piggyback::pb_download(filename, "mdsumner/uwy.new", tag = "v0.0.1")
-  file.remove(filename)
+  if (file.exists(filename)) file.remove(filename)
   curl::curl_download("https://github.com/mdsumner/uwy.new/releases/download/v0.0.1/nuyina_underway.parquet", filename)
   dat <- NULL
   offset <- 0
