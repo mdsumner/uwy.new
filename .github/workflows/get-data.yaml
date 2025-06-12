@@ -1,0 +1,50 @@
+on:
+  schedule:
+    - cron: '50 * * * * '
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+name: get-data
+
+jobs:
+  get-underway:
+    runs-on: ${{ matrix.config.os }}
+    container: mdsumner/hypertidy:main
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          #- {os: macos-latest,   r: 'release'}
+          #- {os: windows-latest, r: 'release'}
+          #- {os: ubuntu-latest,   r: 'devel', http-user-agent: 'release'}
+          - {os: ubuntu-latest,   r: 'release'}
+          #- {os: ubuntu-latest,   r: 'oldrel-1'}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+    steps:
+      - uses: actions/checkout@v4
+
+      #- uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          http-user-agent: ${{ matrix.config.http-user-agent }}
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+
+      #- name: Desperate measures
+      #  run: Rscript -e "install.packages('arrow', repos = c('https://apache.r-universe.dev', 'https://cloud.r-project.org'))"
+
+      - name: Get Nuyina underway
+        run: Rscript -e 'source("R/get_underway.R", echo = TRUE);get_underway(init  = FALSE)'
+
+      - name: Piggyback upload
+        run: Rscript -e 'piggyback::pb_upload("nuyina_underway.parquet", repo = "mdsumner/uwy.new", tag = "v0.0.1", overwrite = TRUE)'
