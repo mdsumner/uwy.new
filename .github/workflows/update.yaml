@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 env:
-  GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.9.0
+  GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.12.1
   RELEASE_TAG: v0.0.1
   PARQUET_FILE: nuyina_underway.parquet
 
@@ -47,12 +47,12 @@ jobs:
           MAX_DT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
             ogrinfo -sql "SELECT MAX(datetime) as max_dt FROM nuyina_underway" \
             "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | \
-            grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' | \
+            grep -oE '[0-9]{4}[-/][0-9]{2}[-/][0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' | \
             head -1 || echo "")
 
           if [[ -n "$MAX_DT" ]]; then
             # Convert space to T if needed
-            MAX_DT="${MAX_DT/ /T}"
+            MAX_DT="${MAX_DT//\//-}"
             echo "datetime=$MAX_DT" >> $GITHUB_OUTPUT
             echo "Max datetime: $MAX_DT"
           else
