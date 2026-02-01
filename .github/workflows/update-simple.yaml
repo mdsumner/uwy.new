@@ -4,8 +4,8 @@ name: Update Underway (Simple)
 # Best for moderate-sized datasets where incremental complexity isn't worth it
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
+  #schedule:
+    #- cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
