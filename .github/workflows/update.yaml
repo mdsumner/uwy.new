@@ -1,0 +1,187 @@
+name: Update Underway Data
+
+on:
+  #schedule:
+    # Run every 6 hours
+  #  - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.9.0
+  RELEASE_TAG: v0.0.1
+  PARQUET_FILE: nuyina_underway.parquet
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download existing parquet from release
+        id: download
+        continue-on-error: true
+        run: |
+          mkdir -p data
+          if curl -fsSL -o "data/${{ env.PARQUET_FILE }}" \
+            "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ env.PARQUET_FILE }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Downloaded existing parquet: $(stat -c%s "data/${{ env.PARQUET_FILE }}") bytes"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No existing parquet found"
+          fi
+
+      - name: Get max datetime from existing data
+        id: maxdt
+        if: steps.download.outputs.exists == 'true'
+        run: |
+          docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+            ogrinfo -al "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | head -100 || true
+
+          # Extract max datetime using SQL
+          MAX_DT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+            ogrinfo -sql "SELECT MAX(datetime) as max_dt FROM nuyina_underway" \
+            "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | \
+            grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}' | \
+            head -1 || echo "")
+
+          if [[ -n "$MAX_DT" ]]; then
+            # Convert space to T if needed
+            MAX_DT="${MAX_DT/ /T}"
+            echo "datetime=$MAX_DT" >> $GITHUB_OUTPUT
+            echo "Max datetime: $MAX_DT"
+          else
+            echo "datetime=" >> $GITHUB_OUTPUT
+            echo "Could not extract max datetime"
+          fi
+
+      - name: Fetch new data from WFS
+        id: fetch
+        run: |
+          WFS_URL="WFS:https://data.aad.gov.au/geoserver/ows?service=wfs&version=2.0.0&request=GetCapabilities"
+          LAYER="underway:nuyina_underway"
+
+          mkdir -p data/tmp
+
+          if [[ -n "${{ steps.maxdt.outputs.datetime }}" ]]; then
+            echo "Fetching incremental data since ${{ steps.maxdt.outputs.datetime }}..."
+
+            # Fetch only new records
+            docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+              ogr2ogr -f Parquet "/data/tmp/new_records.parquet" \
+              "$WFS_URL" "$LAYER" \
+              -where "datetime > '${{ steps.maxdt.outputs.datetime }}'" \
+              -lco COMPRESSION=ZSTD \
+              -progress 2>&1 || true
+
+            if [[ -f "data/tmp/new_records.parquet" ]] && [[ -s "data/tmp/new_records.parquet" ]]; then
+              NEW_COUNT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+                ogrinfo -sql "SELECT COUNT(*) as cnt FROM new_records" "/data/tmp/new_records.parquet" 2>/dev/null | \
+                grep -oE 'cnt \(Integer\) = [0-9]+' | grep -oE '[0-9]+' || echo "0")
+
+              echo "Found $NEW_COUNT new records"
+              echo "new_records=$NEW_COUNT" >> $GITHUB_OUTPUT
+              echo "mode=incremental" >> $GITHUB_OUTPUT
+            else
+              echo "No new records found"
+              echo "new_records=0" >> $GITHUB_OUTPUT
+              echo "mode=none" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Fetching full dataset..."
+            docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+              ogr2ogr -f Parquet "/data/tmp/full.parquet" \
+              "$WFS_URL" "$LAYER" \
+              -lco COMPRESSION=ZSTD \
+              -progress
+
+            echo "mode=full" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge and validate data
+        id: merge
+        run: |
+          set -e
+
+          if [[ "${{ steps.fetch.outputs.mode }}" == "full" ]]; then
+            # Full fetch - just validate and move
+            if [[ -f "data/tmp/full.parquet" ]] && [[ -s "data/tmp/full.parquet" ]]; then
+              mv "data/tmp/full.parquet" "data/${{ env.PARQUET_FILE }}"
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo "ERROR: Full fetch produced no data"
+              echo "status=failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
+          elif [[ "${{ steps.fetch.outputs.mode }}" == "incremental" ]] && [[ "${{ steps.fetch.outputs.new_records }}" != "0" ]]; then
+            echo "Merging incremental data..."
+
+            # Create backup
+            cp "data/${{ env.PARQUET_FILE }}" "data/${{ env.PARQUET_FILE }}.bak"
+
+            # Use ogrmerge to combine files
+            docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+              ogrmerge.py -f Parquet \
+              -o "/data/tmp/merged.parquet" \
+              "/data/${{ env.PARQUET_FILE }}" \
+              "/data/tmp/new_records.parquet" \
+              -single -lco COMPRESSION=ZSTD
+
+            # Validate merged file
+            if [[ -f "data/tmp/merged.parquet" ]] && [[ -s "data/tmp/merged.parquet" ]]; then
+              MERGED_COUNT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+                ogrinfo -sql "SELECT COUNT(*) as cnt FROM merged" "/data/tmp/merged.parquet" 2>/dev/null | \
+                grep -oE '[0-9]+' | tail -1 || echo "0")
+
+              if [[ "$MERGED_COUNT" -gt 0 ]]; then
+                # Atomic replace
+                mv "data/tmp/merged.parquet" "data/${{ env.PARQUET_FILE }}"
+                rm -f "data/${{ env.PARQUET_FILE }}.bak"
+                echo "Merged successfully. Total records: $MERGED_COUNT"
+                echo "status=success" >> $GITHUB_OUTPUT
+              else
+                echo "ERROR: Merged file validation failed, restoring backup"
+                mv "data/${{ env.PARQUET_FILE }}.bak" "data/${{ env.PARQUET_FILE }}"
+                echo "status=failed" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+            else
+              echo "ERROR: Merge failed, restoring backup"
+              mv "data/${{ env.PARQUET_FILE }}.bak" "data/${{ env.PARQUET_FILE }}"
+              echo "status=failed" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
+          else
+            echo "No changes to make"
+            echo "status=unchanged" >> $GITHUB_OUTPUT
+          fi
+
+          # Clean up
+          rm -rf data/tmp
+
+      - name: Get final stats
+        if: steps.merge.outputs.status == 'success'
+        run: |
+          echo "=== Final Data Statistics ==="
+          docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
+            ogrinfo -al -so "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | head -50
+
+          echo ""
+          echo "File size: $(stat -c%s "data/${{ env.PARQUET_FILE }}") bytes"
+
+      - name: Upload to release
+        if: steps.merge.outputs.status == 'success'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: data/${{ env.PARQUET_FILE }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
