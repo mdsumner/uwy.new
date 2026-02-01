@@ -12,23 +12,23 @@ permissions:
   contents: write
 
 env:
-  GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.9.0
+  GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.12.1
   RELEASE_TAG: v0.0.1
   PARQUET_FILE: nuyina_underway.parquet
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Fetch full dataset from WFS
         id: fetch
         run: |
           mkdir -p data
-          
+
           # Fetch to temp file first
           docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
             ogr2ogr -f Parquet "/data/temp.parquet" \
@@ -36,13 +36,13 @@ jobs:
             "underway:nuyina_underway" \
             -lco COMPRESSION=ZSTD \
             -progress
-          
+
           # Validate: file exists and has records
           if [[ -f "data/temp.parquet" ]] && [[ -s "data/temp.parquet" ]]; then
             COUNT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
               ogrinfo -sql "SELECT COUNT(*) as cnt FROM temp" "/data/temp.parquet" 2>/dev/null | \
               grep -oE 'cnt \(Integer\) = [0-9]+' | grep -oE '[0-9]+' || echo "0")
-            
+
             if [[ "$COUNT" -gt 0 ]]; then
               # Atomic rename
               mv "data/temp.parquet" "data/${{ env.PARQUET_FILE }}"
@@ -59,18 +59,18 @@ jobs:
             echo "success=false" >> $GITHUB_OUTPUT
             exit 1
           fi
-      
+
       - name: Show stats
         if: steps.fetch.outputs.success == 'true'
         run: |
           echo "Records: ${{ steps.fetch.outputs.count }}"
           echo "Size: $(stat -c%s "data/${{ env.PARQUET_FILE }}") bytes"
-          
+
           # Show datetime range
           docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
             ogrinfo -sql "SELECT MIN(datetime), MAX(datetime) FROM nuyina_underway" \
             "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | grep -E 'MIN|MAX' || true
-      
+
       - name: Upload to release
         if: steps.fetch.outputs.success == 'true'
         uses: softprops/action-gh-release@v1
