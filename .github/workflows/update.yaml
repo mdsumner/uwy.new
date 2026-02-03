@@ -2,8 +2,12 @@ name: Update Underway Data
 
 on:
   schedule:
-   - cron: '*/30 * * * *'
+    - cron: '0 */2 * * *'  # Every 2 hours (12 runs/day vs 48)
   workflow_dispatch:
+
+concurrency:
+  group: underway-update
+  cancel-in-progress: false  # Let running job finish, don't corrupt data
 
 permissions:
   contents: write
@@ -12,36 +16,61 @@ env:
   GDAL_IMAGE: ghcr.io/osgeo/gdal:ubuntu-full-3.12.1
   RELEASE_TAG: v0.0.1
   PARQUET_FILE: nuyina_underway.parquet
+  WFS_BASE: https://data.aad.gov.au/geoserver/underway/ows
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
+      - name: Get current max datetime from release
+        id: current
+        run: |
+          # Download just enough of the parquet to read metadata (or fail fast if no release)
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ env.PARQUET_FILE }}"
+          
+          if curl -fsSL --head "$RELEASE_URL" > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            # We'll get the actual max datetime after downloading
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No existing release - will do full fetch"
+          fi
+
+      - name: Check WFS for latest record
+        id: check
+        run: |
+          # Lightweight query: just get the single most recent record
+          LATEST=$(curl -sf "${{ env.WFS_BASE }}?service=WFS&version=2.0.0&request=GetFeature&typeName=underway:nuyina_underway&count=1&sortBy=datetime+D&outputFormat=application/json" \
+            | jq -r '.features[0].properties.datetime // empty' 2>/dev/null || echo "")
+          
+          if [[ -z "$LATEST" ]]; then
+            echo "WFS query failed or returned no data"
+            echo "has_data=false" >> $GITHUB_OUTPUT
+          else
+            echo "WFS latest: $LATEST"
+            echo "has_data=true" >> $GITHUB_OUTPUT
+            echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout
+        if: steps.check.outputs.has_data == 'true'
         uses: actions/checkout@v4
 
       - name: Download existing parquet from release
         id: download
-        continue-on-error: true
+        if: steps.check.outputs.has_data == 'true' && steps.current.outputs.exists == 'true'
         run: |
           mkdir -p data
-          if curl -fsSL -o "data/${{ env.PARQUET_FILE }}" \
-            "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ env.PARQUET_FILE }}"; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Downloaded existing parquet: $(stat -c%s "data/${{ env.PARQUET_FILE }}") bytes"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "No existing parquet found"
-          fi
+          curl -fsSL -o "data/${{ env.PARQUET_FILE }}" \
+            "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/${{ env.PARQUET_FILE }}"
+          echo "Downloaded existing parquet: $(stat -c%s "data/${{ env.PARQUET_FILE }}") bytes"
 
       - name: Get max datetime from existing data
         id: maxdt
-        if: steps.download.outputs.exists == 'true'
+        if: steps.download.outcome == 'success'
         run: |
-          docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
-            ogrinfo -al "/data/${{ env.PARQUET_FILE }}" 2>/dev/null | head -100 || true
-
           # Extract max datetime using SQL
           MAX_DT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
             ogrinfo -sql "SELECT MAX(datetime) as max_dt FROM nuyina_underway" \
@@ -50,17 +79,31 @@ jobs:
             head -1 || echo "")
 
           if [[ -n "$MAX_DT" ]]; then
-            # Convert space to T if needed
             MAX_DT="${MAX_DT//\//-}"
             echo "datetime=$MAX_DT" >> $GITHUB_OUTPUT
-            echo "Max datetime: $MAX_DT"
+            echo "Current max datetime: $MAX_DT"
+            
+            # Compare with WFS latest - if same, skip
+            WFS_LATEST="${{ steps.check.outputs.latest }}"
+            # Normalize for comparison (remove fractional seconds, etc)
+            MAX_DT_NORM=$(echo "$MAX_DT" | cut -c1-19)
+            WFS_NORM=$(echo "$WFS_LATEST" | cut -c1-19)
+            
+            if [[ "$MAX_DT_NORM" == "$WFS_NORM" ]] || [[ "$MAX_DT" > "$WFS_LATEST" ]]; then
+              echo "No new data (current: $MAX_DT_NORM, WFS: $WFS_NORM)"
+              echo "needs_update=false" >> $GITHUB_OUTPUT
+            else
+              echo "New data available"
+              echo "needs_update=true" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "datetime=" >> $GITHUB_OUTPUT
-            echo "Could not extract max datetime"
+            echo "Could not extract max datetime, will fetch"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Fetch new data from WFS
         id: fetch
+        if: steps.check.outputs.has_data == 'true' && (steps.current.outputs.exists != 'true' || steps.maxdt.outputs.needs_update == 'true')
         run: |
           WFS_URL="WFS:https://data.aad.gov.au/geoserver/ows?service=wfs&version=2.0.0&request=GetCapabilities"
           LAYER="underway:nuyina_underway"
@@ -70,7 +113,6 @@ jobs:
           if [[ -n "${{ steps.maxdt.outputs.datetime }}" ]]; then
             echo "Fetching incremental data since ${{ steps.maxdt.outputs.datetime }}..."
 
-            # Fetch only new records
             docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
               ogr2ogr -f Parquet "/data/tmp/new_records.parquet" \
               "$WFS_URL" "$LAYER" \
@@ -104,11 +146,11 @@ jobs:
 
       - name: Merge and validate data
         id: merge
+        if: steps.fetch.outcome == 'success'
         run: |
           set -e
 
           if [[ "${{ steps.fetch.outputs.mode }}" == "full" ]]; then
-            # Full fetch - just validate and move
             if [[ -f "data/tmp/full.parquet" ]] && [[ -s "data/tmp/full.parquet" ]]; then
               mv "data/tmp/full.parquet" "data/${{ env.PARQUET_FILE }}"
               echo "status=success" >> $GITHUB_OUTPUT
@@ -121,10 +163,8 @@ jobs:
           elif [[ "${{ steps.fetch.outputs.mode }}" == "incremental" ]] && [[ "${{ steps.fetch.outputs.new_records }}" != "0" ]]; then
             echo "Merging incremental data..."
 
-            # Create backup
             cp "data/${{ env.PARQUET_FILE }}" "data/${{ env.PARQUET_FILE }}.bak"
 
-            # Use ogrmerge to combine files
             docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
               ogrmerge.py -f Parquet \
               -o "/data/tmp/merged.parquet" \
@@ -132,14 +172,12 @@ jobs:
               "/data/tmp/new_records.parquet" \
               -single -lco COMPRESSION=ZSTD
 
-            # Validate merged file
             if [[ -f "data/tmp/merged.parquet" ]] && [[ -s "data/tmp/merged.parquet" ]]; then
               MERGED_COUNT=$(docker run --rm -v "$PWD/data:/data" ${{ env.GDAL_IMAGE }} \
                 ogrinfo -sql "SELECT COUNT(*) as cnt FROM merged" "/data/tmp/merged.parquet" 2>/dev/null | \
                 grep -oE '[0-9]+' | tail -1 || echo "0")
 
               if [[ "$MERGED_COUNT" -gt 0 ]]; then
-                # Atomic replace
                 mv "data/tmp/merged.parquet" "data/${{ env.PARQUET_FILE }}"
                 rm -f "data/${{ env.PARQUET_FILE }}.bak"
                 echo "Merged successfully. Total records: $MERGED_COUNT"
@@ -162,7 +200,6 @@ jobs:
             echo "status=unchanged" >> $GITHUB_OUTPUT
           fi
 
-          # Clean up
           rm -rf data/tmp
 
       - name: Get final stats
