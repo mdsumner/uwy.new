@@ -17,6 +17,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug
+        run: |
+          echo "Runner: $(uname -a)"
+          pwd
+          whoami
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -26,7 +32,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install duckdb
+        run: pip install duckdb numpy pandas
 
       - name: Run voyage detection
         run: python3 scripts/detect_voyages.py
