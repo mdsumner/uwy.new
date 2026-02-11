@@ -15,27 +15,27 @@ env:
 jobs:
   detect:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
       - name: Install dependencies
         run: pip install duckdb
-      
+
       - name: Run voyage detection
-        run: python scripts/detect_voyages.py
-      
+        run: python3 scripts/detect_voyages.py
+
       - name: Show output
         run: |
           echo "=== voyages_draft.json ==="
           cat voyages_draft.json
-      
+
       - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
