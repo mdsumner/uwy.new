@@ -17,6 +17,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug
+        run: |
+          echo "Runner: $(uname -a)"
+          pwd
+          whoami
+
       - name: Checkout
         uses: actions/checkout@v4
 
