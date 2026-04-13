@@ -2,7 +2,7 @@ name: Update Underway Data
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Every 2 hours (12 runs/day vs 48)
+    - cron: '0 */6 * * *'  
   workflow_dispatch:
 
 concurrency:
